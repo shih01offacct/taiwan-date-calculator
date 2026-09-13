@@ -1,0 +1,76 @@
+name: 更新日曆並發布網站
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'GUIDE.html'
+      - 'workflow-copy.txt'
+  schedule:
+    - cron: '23 21 * * *' # 臺灣每天05:23，可能受平台排程延遲
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: calendar-pages
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      update_failed: ${{ steps.update.outcome == 'failure' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 驗證計算與資料防護
+        run: |
+          node --test tests/core.test.cjs
+          python -m unittest discover -s tests -p 'test_*.py'
+      - name: 取得並檢查官方日曆
+        id: update
+        continue-on-error: true
+        run: python scripts/update_calendar.py
+      - name: 保存成功檢查紀錄與日曆
+        if: steps.update.outcome == 'success'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add site/data/calendar.json site/data/calendar.js
+          if ! git diff --cached --quiet; then
+            git commit -m 'Update official calendar check record'
+            git push
+          fi
+      - name: 摘要
+        if: always()
+        env:
+          UPDATE_RESULT: ${{ steps.update.outcome }}
+        run: |
+          echo "Official calendar update: $UPDATE_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          echo 'If failed, previous calendar is retained. First-run empty data blocks workday calculations.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 發布網站
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: 更新失敗時將執行標示為失敗
+        if: needs.build.outputs.update_failed == 'true'
+        run: |
+          echo 'Official calendar update failed. Site deployed with previous data; inspect build logs.'
+          exit 1
